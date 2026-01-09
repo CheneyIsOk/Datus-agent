@@ -6,6 +6,7 @@ import argparse
 import csv
 import os
 import shutil
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, AsyncGenerator, Dict, Optional, Set
 
@@ -18,15 +19,21 @@ from datus.models.base import LLMBaseModel
 # Import model implementations
 from datus.schemas.action_history import ActionHistory, ActionHistoryManager
 from datus.schemas.agent_models import SubAgentConfig
+from datus.schemas.batch_events import BatchEvent, BatchStage
 from datus.schemas.node_models import SqlTask
 from datus.storage.ext_knowledge.ext_knowledge_init import init_ext_knowledge
 from datus.storage.ext_knowledge.store import ExtKnowledgeStore
-from datus.storage.metric.metrics_init import init_semantic_yaml_metrics, init_success_story_metrics
-from datus.storage.metric.store import SemanticMetricsRAG
+from datus.storage.metric.metric_init import init_semantic_yaml_metrics, init_success_story_metrics
+from datus.storage.metric.store import MetricRAG
 from datus.storage.schema_metadata import SchemaWithValueRAG
 from datus.storage.schema_metadata.benchmark_init import init_snowflake_schema
 from datus.storage.schema_metadata.benchmark_init_bird import init_dev_schema
 from datus.storage.schema_metadata.local_init import init_local_schema
+from datus.storage.semantic_model.semantic_model_init import (
+    init_semantic_yaml_semantic_model,
+    init_success_story_semantic_model,
+)
+from datus.storage.semantic_model.store import SemanticModelRAG
 from datus.storage.sub_agent_kb_bootstrap import SUPPORTED_COMPONENTS as SUB_AGENT_COMPONENTS
 from datus.storage.sub_agent_kb_bootstrap import SubAgentBootstrapper
 from datus.tools.db_tools.db_manager import DBManager, db_manager_instance
@@ -71,6 +78,9 @@ class Agent:
         self.storage_modules = {}
         self.metadata_store = None
         self.metrics_store = None
+        self._ref_sql_file_sql_counter: Dict[str, int] = {}
+        self._metrics_row_stage_seen: Dict[int, Set[str]] = {}
+        self._print_lock = threading.Lock()
         self._check_storage_modules()
 
     def _initialize_model(self) -> LLMBaseModel:
@@ -244,6 +254,113 @@ class Agent:
             except Exception as exc:
                 logger.warning(f"Failed to refresh scoped KB for sub-agent '{name}': {exc}")
 
+    def _reset_reference_sql_stream_state(self) -> None:
+        self._ref_sql_file_sql_counter = {}
+
+    def _reset_metrics_stream_state(self) -> None:
+        self._metrics_row_stage_seen = {}
+
+    def _print_stream_lines(self, message: Optional[object], indent: str = "  ", prefix: str = "") -> None:
+        if not message:
+            return
+        text = str(message).strip()
+        if not text:
+            return
+        for line in text.splitlines():
+            print(f"{prefix}{indent}{line}", flush=True)
+
+    def _next_reference_sql_number(self, filepath: str) -> int:
+        with self._print_lock:
+            count = self._ref_sql_file_sql_counter.get(filepath, 0) + 1
+            self._ref_sql_file_sql_counter[filepath] = count
+            return count
+
+    def _format_reference_sql_line(self, sql_text: str, number: int) -> str:
+        condensed = " ".join(str(sql_text).split())
+        return condensed or f"sql_{number}"
+
+    def _get_file_short_name(self, filepath: str) -> str:
+        """Extract short filename for display prefix."""
+        basename = os.path.basename(filepath)
+        name, _ = os.path.splitext(basename)
+        return name
+
+    def _emit_reference_sql_event(self, event: BatchEvent) -> None:
+        stage = event.stage
+        filepath = event.group_id or "unknown_file"
+        short_name = self._get_file_short_name(filepath)
+        prefix = f"[{short_name}] "
+
+        if stage == BatchStage.GROUP_STARTED:
+            logger.info(f"reference_sql file start: {filepath}")
+            print(f"{prefix}start processing {filepath}", flush=True)
+            return
+
+        if stage == BatchStage.GROUP_COMPLETED:
+            logger.info(f"reference_sql file complete: {filepath}")
+            print(f"{prefix}completed", flush=True)
+            return
+
+        if stage == BatchStage.ITEM_STARTED:
+            payload = event.payload or {}
+            number = self._next_reference_sql_number(filepath)
+            sql_line = self._format_reference_sql_line(str(payload.get("sql") or ""), number)
+            print(f"{prefix}#{number}. {sql_line}", flush=True)
+            return
+
+        if stage == BatchStage.ITEM_PROCESSING:
+            payload = event.payload or {}
+            self._print_stream_lines(payload.get("output", {}).get("raw_output"), prefix=prefix)
+            return
+
+        if stage == BatchStage.ITEM_FAILED:
+            error = event.error
+            if error:
+                self._print_stream_lines(error, prefix=prefix)
+            return
+
+    def _emit_metrics_event(self, event: BatchEvent) -> None:
+        stage = event.stage
+        payload = event.payload or {}
+        row_idx = payload.get("row_idx", "?")
+        prefix = f"[row{row_idx}] "
+
+        if stage == BatchStage.ITEM_STARTED:
+            question = payload.get("question") or ""
+            logger.info(f"metrics row start: {row_idx}")
+            print(f"{prefix}start: {question}".strip(), flush=True)
+            table_name = payload.get("table_name")
+            if table_name:
+                print(f"{prefix}  table: {table_name}", flush=True)
+            return
+
+        if stage == BatchStage.ITEM_PROCESSING:
+            action_name = event.action_name or "action"
+            with self._print_lock:
+                seen = self._metrics_row_stage_seen.setdefault(row_idx, set())
+                if action_name not in seen:
+                    seen.add(action_name)
+                    print(f"{prefix}  {action_name}:", flush=True)
+            self._print_stream_lines(payload.get("output", {}).get("raw_output"), indent="    ", prefix=prefix)
+            # Check for semantic model output
+            output = payload.get("output")
+            if isinstance(output, dict):
+                semantic_model_file = output.get("semantic_model")
+                if semantic_model_file:
+                    print(f"{prefix}  semantic_model: {semantic_model_file}", flush=True)
+            return
+
+        if stage == BatchStage.ITEM_COMPLETED:
+            logger.info(f"metrics row success: {row_idx}")
+            print(f"{prefix}completed", flush=True)
+            return
+
+        if stage == BatchStage.ITEM_FAILED:
+            error = event.error or "unknown error"
+            logger.error(f"metrics row error: {row_idx}")
+            print(f"{prefix}error: {error}", flush=True)
+            return
+
     def bootstrap_kb(self):
         """Initialize knowledge base storage components."""
         logger.info("Initializing knowledge base components")
@@ -348,41 +465,73 @@ class Agent:
                 self._refresh_scoped_agents("metadata", kb_update_strategy)
                 return result
 
-            elif component == "metrics":
+            elif component == "semantic_model":
                 semantic_model_path = os.path.join(dir_path, "semantic_model.lance")
-                metrics_path = os.path.join(dir_path, "metrics.lance")
                 if kb_update_strategy == "overwrite":
                     if os.path.exists(semantic_model_path):
                         shutil.rmtree(semantic_model_path)
                         logger.info(f"Deleted existing directory {semantic_model_path}")
+                    self.global_config.save_storage_config("semantic_model")
+                else:
+                    self.global_config.check_init_storage_config("semantic_model")
+
+                # Initialize semantic model
+                if hasattr(self.args, "semantic_yaml") and self.args.semantic_yaml:
+                    successful, error_message = init_semantic_yaml_semantic_model(
+                        self.args.semantic_yaml, self.global_config
+                    )
+                else:
+                    successful, error_message = init_success_story_semantic_model(self.args, self.global_config)
+
+                if successful:
+                    temp_rag = SemanticModelRAG(self.global_config)
+                    result = {
+                        "status": "success",
+                        "message": f"semantic_model bootstrap completed, "
+                        f"semantic_object_count={temp_rag.get_size()}",
+                        "error": error_message,
+                    }
+                    self._refresh_scoped_agents("semantic_model", kb_update_strategy)
+                else:
+                    result = {"status": "failed", "message": error_message}
+                return result
+
+            elif component == "metrics":
+                metrics_path = os.path.join(dir_path, "metrics.lance")
+                if kb_update_strategy == "overwrite":
                     if os.path.exists(metrics_path):
                         shutil.rmtree(metrics_path)
                         logger.info(f"Deleted existing directory {metrics_path}")
-                    self.global_config.save_storage_config("metric")
+                    self.global_config.save_storage_config("metric")  # Keep compatibility
                 else:
                     self.global_config.check_init_storage_config("metric")
+                self._reset_metrics_stream_state()
                 # Initialize metrics using unified SemanticAgenticNode approach
                 if hasattr(self.args, "semantic_yaml") and self.args.semantic_yaml:
-                    successful, error_message = init_semantic_yaml_metrics(self.args.semantic_yaml, self.global_config)
+                    successful, error_message = init_semantic_yaml_metrics(
+                        self.args.semantic_yaml,
+                        self.global_config,
+                    )
                 else:
-                    successful, error_message = init_success_story_metrics(self.args, self.global_config, subject_tree)
+                    successful, error_message = init_success_story_metrics(
+                        self.args,
+                        self.global_config,
+                        subject_tree,
+                        emit=self._emit_metrics_event,
+                        # pool_size=pool_size,
+                    )
 
-                # Create metrics_store for statistics
                 if successful:
-                    self.metrics_store = SemanticMetricsRAG(self.global_config)
+                    self.metrics_store = MetricRAG(self.global_config)
                     result = {
                         "status": "success",
-                        "message": f"metrics bootstrap completed,"
-                        f"semantic_model_size={self.metrics_store.get_semantic_model_size()}, "
-                        f"metrics_size={self.metrics_store.get_metrics_size()}",
+                        "message": f"metrics bootstrap completed, "
+                        f"metrics_count={self.metrics_store.get_metrics_size()}",
                         "error": error_message,
                     }
                     self._refresh_scoped_agents("metrics", kb_update_strategy)
                 else:
-                    result = {
-                        "status": "failed",
-                        "message": error_message,
-                    }
+                    result = {"status": "failed", "message": error_message}
                 return result
             elif component == "document":
                 from datus.storage.document.store import document_store
@@ -422,13 +571,16 @@ class Agent:
                 from datus.storage.reference_sql.reference_sql_init import init_reference_sql
 
                 self.reference_sql_store = ReferenceSqlRAG(self.global_config)
+                self._reset_reference_sql_stream_state()
                 result = init_reference_sql(
                     self.reference_sql_store,
-                    self.args,
                     self.global_config,
+                    self.args.sql_dir,
+                    validate_only=self.args.validate_only or False,
                     build_mode=kb_update_strategy,
                     pool_size=pool_size,
                     subject_tree=subject_tree,
+                    emit=self._emit_reference_sql_event,
                 )
                 if isinstance(result, dict) and result.get("status") != "error":
                     self._refresh_scoped_agents("reference_sql", kb_update_strategy)

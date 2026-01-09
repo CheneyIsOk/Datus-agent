@@ -17,7 +17,7 @@ from datus.cli.generation_hooks import GenerationHooks
 from datus.configuration.agent_config import AgentConfig
 from datus.schemas.action_history import ActionHistory, ActionHistoryManager, ActionRole, ActionStatus
 from datus.schemas.sql_summary_agentic_node_models import SqlSummaryNodeInput, SqlSummaryNodeResult
-from datus.tools.func_tool.filesystem_tool import FilesystemFuncTool
+from datus.tools.func_tool.filesystem_tools import FilesystemFuncTool
 from datus.tools.func_tool.generation_tools import GenerationTools
 from datus.utils.loggings import get_logger
 from datus.utils.path_manager import get_path_manager
@@ -97,7 +97,7 @@ class SqlSummaryAgenticNode(AgenticNode):
         self.hooks = None
         self.setup_tools()
 
-        logger.info(f"Hooks after setup: {self.hooks} (type: {type(self.hooks)})")
+        logger.debug(f"Hooks after setup: {self.hooks} (type: {type(self.hooks)})")
 
     def get_node_name(self) -> str:
         """
@@ -412,7 +412,7 @@ class SqlSummaryAgenticNode(AgenticNode):
             yield assistant_action
 
             logger.debug(f"Tools available: {len(self.tools)} tools - {[tool.name for tool in self.tools]}")
-            logger.info(f"Passing hooks to model: {self.hooks} (type: {type(self.hooks)})")
+            logger.debug(f"Passing hooks to model: {self.hooks} (type: {type(self.hooks)})")
 
             # Initialize response collection variables
             response_content = ""

@@ -2,15 +2,15 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-import logging
 from typing import Any, Dict, List, Optional
 
 import pyarrow as pa
 
 from datus.storage.embedding_models import EmbeddingModel, get_document_embedding_model
 from datus.storage.subject_tree.store import BaseSubjectEmbeddingStore, base_schema_columns
+from datus.utils.loggings import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ExtKnowledgeStore(BaseSubjectEmbeddingStore):
@@ -118,6 +118,7 @@ class ExtKnowledgeStore(BaseSubjectEmbeddingStore):
         self,
         query_text: Optional[str] = None,
         subject_path: Optional[List[str]] = None,
+        select_fields: Optional[List[str]] = None,
         top_n: Optional[int] = 5,
     ) -> List[Dict[str, Any]]:
         """Search for similar knowledge entries.
@@ -134,6 +135,7 @@ class ExtKnowledgeStore(BaseSubjectEmbeddingStore):
         return self.search_with_subject_filter(
             query_text=query_text,
             subject_path=subject_path,
+            selected_fields=select_fields,
             top_n=top_n,
             name_field="terminology",
         )

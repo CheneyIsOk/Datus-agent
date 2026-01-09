@@ -100,7 +100,15 @@ def create_parser() -> argparse.ArgumentParser:
         "--components",
         type=str,
         nargs="+",
-        choices=["metrics", "metadata", "table_lineage", "document", "ext_knowledge", "reference_sql"],
+        choices=[
+            "metrics",
+            "metadata",
+            "semantic_model",
+            "table_lineage",
+            "document",
+            "ext_knowledge",
+            "reference_sql",
+        ],
         default=["metadata"],
         help="Knowledge base components to initialize",
     )
@@ -300,6 +308,14 @@ def create_parser() -> argparse.ArgumentParser:
         help="Path to summary report file. Reports will be appended to this file.",
     )
 
+    bi_subparser = subparsers.add_parser(
+        "bootstrap-bi",
+        help="Build subagent by bi dashboard url",
+        parents=[global_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    bi_subparser.add_argument("--namespace", type=str, required=True, help="Database namespace")
+
     # tutorial command
     subparsers.add_parser(
         "tutorial",
@@ -375,7 +391,7 @@ def main():
         from datus.cli.tutorial import BenchmarkTutorial
 
         configure_logging(args.debug, console_output=False)
-        tutorial = BenchmarkTutorial(args.config or "~/.datus/conf/agent.yml")
+        tutorial = BenchmarkTutorial(args.config)
         return tutorial.run()
 
     if args.action == "namespace":
@@ -394,6 +410,11 @@ def main():
     from datus.configuration.agent_config_loader import load_agent_config
 
     agent_config = load_agent_config(**vars(args))
+    if args.action == "bootstrap-bi":
+        configure_logging(args.debug, console_output=False)
+        from datus.cli.bi_dashboard import BiDashboardCommands
+
+        return BiDashboardCommands(agent_config).cmd()
 
     # Initialize agent with both args and config
     from datus.agent.agent import Agent
