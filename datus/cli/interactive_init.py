@@ -33,12 +33,20 @@ class InteractiveInit:
     def __init__(self, user_home: Optional[str] = None):
         self.workspace_path = ""
         self.namespace_name = ""
-        self.user_home = user_home if user_home else Path.home()
 
         # Use path manager for directory paths
-        from datus.utils.path_manager import get_path_manager
+        from datus.utils.path_manager import get_path_manager, reset_path_manager
 
-        path_manager = get_path_manager()
+        if user_home:
+            reset_path_manager()
+            path_manager = get_path_manager(datus_home=user_home)
+            self.user_home = Path(user_home)
+            if not self.user_home.exists():
+                self.user_home.mkdir(parents=True, exist_ok=True)
+                console.print(f"[green]Created home directory at {self.user_home}[/green]")
+        else:
+            path_manager = get_path_manager()
+            self.user_home = Path.home()
         self.conf_dir = path_manager.conf_dir
         self.template_dir = path_manager.template_dir
         self.sample_dir = path_manager.sample_dir
@@ -65,11 +73,17 @@ class InteractiveInit:
                 }
             }
 
+        # Ensure home directory is saved in configuration
+        if "agent" not in self.config:
+            self.config["agent"] = {}
+        self.config["agent"]["home"] = str(self.user_home.resolve())
+
     def _init_dirs(self):
         from datus.utils.path_manager import get_path_manager
 
         path_manager = get_path_manager()
-        path_manager.ensure_dirs("conf", "data", "logs", "sessions", "template", "sample")
+        # Ensure all standard directories are created in the configured home
+        path_manager.ensure_dirs("conf", "data", "logs", "sessions", "template", "sample", "benchmark")
 
     def run(self) -> int:
         """Main entry point for the interactive initialization."""
@@ -515,6 +529,16 @@ def create_agent(namespace_name: str, components: list, config_path: str, **kwar
 
     from datus.agent.agent import Agent
     from datus.configuration.agent_config_loader import load_agent_config
+    from datus.utils.path_manager import get_path_manager
+
+    # Ensure agent config uses the correct home directory
+    # For init command, path_manager is already configured with custom home if provided
+    path_manager = get_path_manager()
+    
+    # If using custom home, we need to make sure load_agent_config uses the config file from that home
+    if not config_path and path_manager.datus_home != Path.home() / ".datus":
+        config_path = str(path_manager.agent_config_path())
+        args.config = config_path
 
     agent_config = load_agent_config(reload=True, config_path=config_path, **vars(args))
 
@@ -615,8 +639,14 @@ def init_sql_and_log_result(
 
 def main():
     """Entry point for the interactive init command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Initialize Datus Agent configuration")
+    parser.add_argument("--home", type=str, help="Custom home directory for Datus Agent")
+    args = parser.parse_args()
+
     configure_logging(console_output=False)
-    init = InteractiveInit()
+    init = InteractiveInit(user_home=args.home)
     return init.run()
 
 

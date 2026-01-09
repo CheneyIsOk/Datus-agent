@@ -9,21 +9,14 @@ import os
 import sys
 from datetime import datetime
 
-from datus.cli.namespace_manager import NamespaceManager
-from datus.cli.tutorial import BenchmarkTutorial
-from datus.utils.async_utils import setup_windows_policy
-
 # Add path fixing to ensure proper imports
 if __package__ is None:
     # Add parent directory to Python path
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datus import __version__
-from datus.agent.agent import Agent
 from datus.cli.interactive_init import InteractiveInit
-from datus.configuration.agent_config_loader import load_agent_config
-from datus.schemas.node_models import SqlTask
-from datus.utils.exceptions import setup_exception_handler
+from datus.utils.async_utils import setup_windows_policy
 from datus.utils.loggings import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -54,12 +47,13 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="action", help="Action to perform")
 
     # init command
-    subparsers.add_parser(
+    init_parser = subparsers.add_parser(
         "init",
         help="Interactive setup wizard for basic configuration",
         parents=[global_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    init_parser.add_argument("--home", type=str, help="Custom home directory for Datus Agent")
 
     # namespace command
     namespace_parser = subparsers.add_parser(
@@ -365,27 +359,46 @@ def main():
 
     # Handle init command separately as it doesn't require existing configuration
     if args.action == "init":
+        # If home is specified, initialize PathManager before logging configuration
+        # This prevents default logs directory (~/.datus/logs) from being created
+        if args.home:
+            from datus.utils.path_manager import get_path_manager, reset_path_manager
+
+            reset_path_manager()
+            get_path_manager(datus_home=args.home)
+
         configure_logging(args.debug, console_output=False)
-        init = InteractiveInit()
+        init = InteractiveInit(user_home=args.home)
         return init.run()
 
     if args.action == "tutorial":
+        from datus.cli.tutorial import BenchmarkTutorial
+
         configure_logging(args.debug, console_output=False)
         tutorial = BenchmarkTutorial(args.config or "~/.datus/conf/agent.yml")
         return tutorial.run()
 
     if args.action == "namespace":
+        from datus.cli.namespace_manager import NamespaceManager
+
         configure_logging(args.debug, console_output=False)
         namespace_manager = NamespaceManager(args.config or "")
         return namespace_manager.run(args.command)
 
     configure_logging(args.debug)
+    from datus.utils.exceptions import setup_exception_handler
+
     setup_exception_handler()
 
     # Load agent configuration
+    from datus.configuration.agent_config_loader import load_agent_config
+
     agent_config = load_agent_config(**vars(args))
 
     # Initialize agent with both args and config
+    from datus.agent.agent import Agent
+    from datus.schemas.node_models import SqlTask
+
     agent = Agent(args, agent_config)
     result = None
     # Execute different functions based on action

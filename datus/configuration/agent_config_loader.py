@@ -174,7 +174,24 @@ def load_agent_config(reload: bool = False, **kwargs) -> AgentConfig:
     except Exception:
         pass
 
-    agent_raw = configuration_manager(config_path=kwargs.get("config", ""), reload=reload).data
+    cm = configuration_manager(config_path=kwargs.get("config", ""), reload=reload)
+    agent_raw = cm.data
+
+    # Auto-detect home from config file location if not specified
+    if "home" not in agent_raw:
+        config_path = cm.config_path.resolve()
+        # If config file is in a 'conf' directory, assume parent is home
+        if config_path.parent.name == "conf":
+            inferred_home = config_path.parent.parent
+            logger.info(f"Inferring home directory from config location: {inferred_home}")
+            agent_raw["home"] = str(inferred_home)
+
+    # Update PathManager home if configured
+    if "home" in agent_raw:
+        from datus.utils.path_manager import get_path_manager
+
+        get_path_manager().update_home(agent_raw["home"])
+
     nodes = {}
     if "nodes" in agent_raw:
         nodes_raw = agent_raw["nodes"]
