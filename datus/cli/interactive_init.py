@@ -47,7 +47,7 @@ class InteractiveInit:
             self.user_home = Path(user_home)
             if not self.user_home.exists():
                 self.user_home.mkdir(parents=True, exist_ok=True)
-                console.print(f"[green]Created home directory at {self.user_home}[/green]")
+                self.console.print(f"[green]Created home directory at {self.user_home}[/green]")
         else:
             path_manager = get_path_manager()
             self.user_home = Path.home()
